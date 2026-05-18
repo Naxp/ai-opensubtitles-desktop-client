@@ -18,6 +18,9 @@ import { logger } from './utils/errorLogger'; // Initialize global error handler
 import appConfig from './config/appConfig.json';
 import packageInfo from '../../package.json';
 import logoImage from './assets/logo.png';
+import { LocalAIProvider } from './services/localAI';
+
+const DEFAULT_API_KEY = '5MGRBWO9lHA023KPmVMaa0PoRYHqQKpK';
 
 interface AppConfig {
   username: string;
@@ -34,6 +37,15 @@ interface AppConfig {
   audio_language_detection_time?: number;
   apiBaseUrl?: string;
   apiUrlParameter?: string;
+  aiProvider?: LocalAIProvider;
+  ollamaBaseUrl?: string;
+  lmStudioBaseUrl?: string;
+  lmStudioApiKey?: string;
+  argosPythonPath?: string;
+  localTranscriptionEngine?: 'whisper-cpp' | 'openai-whisper';
+  whisperExecutablePath?: string;
+  whisperModelPath?: string;
+  whisperModel?: string;
   autoLanguageDetection?: boolean;
   darkMode?: boolean;
   userId?: number;
@@ -90,10 +102,35 @@ function App() {
   const loadConfig = async () => {
     try {
       const loadedConfig = await window.electronAPI.getConfig();
-      setConfig(loadedConfig);
+      setConfig({
+        ...loadedConfig,
+        username: loadedConfig.username || '',
+        password: loadedConfig.password || '',
+        apiKey: loadedConfig.apiKey || DEFAULT_API_KEY,
+        aiProvider: loadedConfig.aiProvider || 'ollama',
+        ollamaBaseUrl: loadedConfig.ollamaBaseUrl || 'http://127.0.0.1:11434',
+        lmStudioBaseUrl: loadedConfig.lmStudioBaseUrl || 'http://127.0.0.1:1234/v1',
+        argosPythonPath: loadedConfig.argosPythonPath || '',
+        localTranscriptionEngine: loadedConfig.localTranscriptionEngine || 'whisper-cpp',
+        whisperExecutablePath: loadedConfig.whisperExecutablePath || '',
+        whisperModelPath: loadedConfig.whisperModelPath || '',
+        whisperModel: loadedConfig.whisperModel || 'base'
+      });
     } catch (error) {
       console.error('Failed to load config:', error);
-      setConfig({} as AppConfig); // Empty config will show login
+      setConfig({
+        username: '',
+        password: '',
+        apiKey: DEFAULT_API_KEY,
+        aiProvider: 'ollama',
+        ollamaBaseUrl: 'http://127.0.0.1:11434',
+        lmStudioBaseUrl: 'http://127.0.0.1:1234/v1',
+        argosPythonPath: '',
+        localTranscriptionEngine: 'whisper-cpp',
+        whisperExecutablePath: '',
+        whisperModelPath: '',
+        whisperModel: 'base'
+      } as AppConfig);
     } finally {
       setIsLoading(false);
     }
@@ -109,20 +146,29 @@ function App() {
     );
   }
 
-  // Determine if we have valid credentials
-  const hasCredentials = config?.username && config?.password && config?.apiKey;
+  const hasApiConfig = !!(config?.apiKey || DEFAULT_API_KEY);
 
   // Render providers ONCE at top level - never unmount/remount them
   return (
     <PowerProvider>
       <APIProvider
-        initialConfig={hasCredentials ? {
-          username: config.username,
-          password: config.password,
-          apiKey: config.apiKey!,
-          apiBaseUrl: config.apiBaseUrl,
-          apiUrlParameter: config.apiUrlParameter
+        initialConfig={hasApiConfig && config ? {
+          username: config.username || '',
+          password: config.password || '',
+          apiKey: config.apiKey || DEFAULT_API_KEY,
+          apiBaseUrl: undefined,
+          apiUrlParameter: config.apiUrlParameter,
+          aiProvider: config.aiProvider || 'ollama',
+          ollamaBaseUrl: config.ollamaBaseUrl || 'http://127.0.0.1:11434',
+          lmStudioBaseUrl: config.lmStudioBaseUrl || 'http://127.0.0.1:1234/v1',
+          lmStudioApiKey: config.lmStudioApiKey,
+          argosPythonPath: config.argosPythonPath || '',
+          localTranscriptionEngine: config.localTranscriptionEngine || 'whisper-cpp',
+          whisperExecutablePath: config.whisperExecutablePath || '',
+          whisperModelPath: config.whisperModelPath || '',
+          whisperModel: config.whisperModel || 'base'
         } : undefined}
+        key={`${config?.aiProvider || 'ollama'}:${config?.ollamaBaseUrl || ''}:${config?.lmStudioBaseUrl || ''}:${config?.lmStudioApiKey || ''}:${config?.argosPythonPath || ''}:${config?.localTranscriptionEngine || ''}:${config?.whisperExecutablePath || ''}:${config?.whisperModelPath || ''}:${config?.whisperModel || ''}`}
       >
         {/* Splash screen overlay - conditional render inside providers */}
         {showSplashScreen && (
@@ -212,7 +258,7 @@ function App() {
         <AppContent
           config={config}
           setConfig={setConfig}
-          hasCredentials={!!hasCredentials}
+          hasApiConfig={hasApiConfig}
           isLoading={isLoading}
         />
       </APIProvider>
@@ -224,12 +270,12 @@ function App() {
 function AppContent({ 
   config, 
   setConfig, 
-  hasCredentials,
+  hasApiConfig,
   isLoading
 }: { 
   config: AppConfig | null; 
   setConfig: (config: AppConfig | null | ((prev: AppConfig | null) => AppConfig | null)) => void;
-  hasCredentials: boolean;
+  hasApiConfig: boolean;
   isLoading: boolean;
 }) {
   const {
@@ -273,20 +319,14 @@ function AppContent({
   // Using ref instead of state to avoid async update issues
   const showNotificationRef = useRef<((message: string, duration?: number) => void) | null>(null);
 
-  // Set initial screen based on authentication state
+  // The desktop shell is usable locally without OpenSubtitles account credentials.
   useEffect(() => {
     if (forceShowSetup) return; // Skip auto-redirect if forcing setup screen view
-    
-    if (!hasCredentials) {
-      // Only show login screen if no credentials exist at all
-      setCurrentScreen('login');
-    } else if (currentScreen === 'login') {
-      // Only auto-navigate to main screen if coming from login screen
-      // Preserve current screen location during authentication maintenance operations
+
+    if (currentScreen === 'login') {
       setCurrentScreen('main');
     }
-    // Don't auto-navigate when user is already on functional screens (credits, batch, etc.)
-  }, [hasCredentials, isAuthenticated, currentScreen, forceShowSetup]);
+  }, [currentScreen, forceShowSetup]);
 
   useEffect(() => {
     // Set up keyboard shortcut listener
@@ -488,28 +528,30 @@ function AppContent({
 
   const handlePreferencesSave = async (newConfig: Partial<AppConfig>): Promise<boolean> => {
     try {
-      setAppProcessing(true, 'Validating credentials...');
-      
-      // If username, password, or apiKey are being changed, validate them using centralized login
-      if (newConfig.username || newConfig.password || newConfig.apiKey) {
-        // Use the new values if provided, otherwise use current config values
-        const username = newConfig.username || config?.username || '';
-        const password = newConfig.password || config?.password || '';
-        const apiKey = newConfig.apiKey || config?.apiKey || '';
-        
-        // Use centralized login for validation
-        const success = await login(username, password, apiKey);
-        if (!success) {
-          console.error('Credential validation failed');
-          return false;
-        }
-      }
-      
-      // If validation passed, save the config
-      const success = await window.electronAPI.saveConfig(newConfig);
+      setAppProcessing(true, 'Saving settings...');
+
+      const success = await window.electronAPI.saveConfig({
+        ...newConfig,
+        apiKey: newConfig.apiKey || config?.apiKey || DEFAULT_API_KEY
+      });
       if (success) {
         const updatedConfig = await window.electronAPI.getConfig();
-        setConfig(updatedConfig);
+        setConfig({
+          ...updatedConfig,
+          username: updatedConfig.username || '',
+          password: updatedConfig.password || '',
+          apiKey: updatedConfig.apiKey || DEFAULT_API_KEY
+          ,
+          aiProvider: updatedConfig.aiProvider || 'ollama',
+          ollamaBaseUrl: updatedConfig.ollamaBaseUrl || 'http://127.0.0.1:11434',
+          lmStudioBaseUrl: updatedConfig.lmStudioBaseUrl || 'http://127.0.0.1:1234/v1',
+          lmStudioApiKey: updatedConfig.lmStudioApiKey,
+          argosPythonPath: updatedConfig.argosPythonPath || '',
+          localTranscriptionEngine: updatedConfig.localTranscriptionEngine || 'whisper-cpp',
+          whisperExecutablePath: updatedConfig.whisperExecutablePath || '',
+          whisperModelPath: updatedConfig.whisperModelPath || '',
+          whisperModel: updatedConfig.whisperModel || 'base'
+        });
         return true;
       }
       return false;
@@ -751,8 +793,8 @@ function AppContent({
             isPreviewMode={forceShowSetup}
             onCancelPreview={() => {
               setForceShowSetup(false);
-              if (!hasCredentials) {
-                setCurrentScreen('login');
+              if (hasApiConfig) {
+                setCurrentScreen('main');
               }
             }}
           />
@@ -887,7 +929,7 @@ function AppContent({
         isProcessing={isProcessing}
         currentTask={currentTask}
         config={config ? {
-          apiBaseUrl: config.apiBaseUrl,
+          apiBaseUrl: undefined,
           apiConnectivityTestIntervalMinutes: config.apiConnectivityTestIntervalMinutes
         } : undefined}
         onNotificationShow={(callback) => { showNotificationRef.current = callback; }}
@@ -909,7 +951,7 @@ function AppContent({
                 onClick={async () => {
                   const success = await reconnect();
                   if (!success) {
-                    setCurrentScreen('login');
+                    setCurrentScreen('preferences');
                   }
                 }}
                 disabled={isAuthenticating}
@@ -918,7 +960,7 @@ function AppContent({
               </button>
               <button
                 className="btn-secondary"
-                onClick={async () => { await logout(); setCurrentScreen('login'); }}
+                onClick={async () => { await logout(); setCurrentScreen('preferences'); }}
               >
                 Log Out
               </button>

@@ -2,6 +2,8 @@ import { app } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 
+const DEFAULT_API_KEY = '5MGRBWO9lHA023KPmVMaa0PoRYHqQKpK';
+
 export interface AppConfig {
   username: string;
   password: string;
@@ -15,6 +17,15 @@ export interface AppConfig {
   betaTest?: boolean;
   ffmpegPath?: string;
   apiBaseUrl?: string;
+  aiProvider?: 'ollama' | 'lmstudio' | 'argos';
+  ollamaBaseUrl?: string;
+  lmStudioBaseUrl?: string;
+  lmStudioApiKey?: string;
+  argosPythonPath?: string;
+  localTranscriptionEngine?: 'whisper-cpp' | 'openai-whisper';
+  whisperExecutablePath?: string;
+  whisperModelPath?: string;
+  whisperModel?: string;
   userId?: number;
   autoLanguageDetection?: boolean;
   credits?: {
@@ -54,15 +65,24 @@ export class ConfigManager {
     return {
       username: '',
       password: '',
-      apiKey: '5MGRBWO9lHA023KPmVMaa0PoRYHqQKpK',
+      apiKey: DEFAULT_API_KEY,
       debugMode: false,
-      checkUpdatesOnStart: true,
+      checkUpdatesOnStart: false,
       autoRemoveCompletedFiles: false,
       cacheExpirationHours: 24,
       betaTest: false,
       ffmpegPath: '',
       apiBaseUrl: 'https://api.opensubtitles.com/api/v1',
-      autoLanguageDetection: true,
+      aiProvider: 'ollama',
+      ollamaBaseUrl: 'http://127.0.0.1:11434',
+      lmStudioBaseUrl: 'http://127.0.0.1:1234/v1',
+      lmStudioApiKey: '',
+      argosPythonPath: '',
+      localTranscriptionEngine: 'whisper-cpp',
+      whisperExecutablePath: '',
+      whisperModelPath: '',
+      whisperModel: 'base',
+      autoLanguageDetection: false,
     };
   }
 
@@ -198,11 +218,20 @@ export class ConfigManager {
       this.config = {
         username: '',
         password: '',
-        apiKey: '',
+        apiKey: DEFAULT_API_KEY,
         debugMode: false,
-        checkUpdatesOnStart: true,
+        checkUpdatesOnStart: false,
         apiBaseUrl: 'https://api.opensubtitles.com/api/v1',
-        autoLanguageDetection: true,
+        aiProvider: 'ollama',
+        ollamaBaseUrl: 'http://127.0.0.1:11434',
+        lmStudioBaseUrl: 'http://127.0.0.1:1234/v1',
+        lmStudioApiKey: '',
+        argosPythonPath: '',
+        localTranscriptionEngine: 'whisper-cpp',
+        whisperExecutablePath: '',
+        whisperModelPath: '',
+        whisperModel: 'base',
+        autoLanguageDetection: false,
       };
       this.debug(2, 'Config', 'In-memory config reset successfully');
       

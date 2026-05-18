@@ -4,6 +4,8 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { ConfigManager } from './config';
 import { FFmpegManager } from './ffmpeg';
+import { WhisperManager } from './whisper';
+import { ArgosManager } from './argos';
 import { initializePowerSaveBlocker, cleanupPowerSaveBlocker } from './powerSaveBlocker';
 import * as fileFormatsConfig from '../shared/fileFormats.json';
 import { calculateMovieHash } from './utils/moviehash';
@@ -551,13 +553,13 @@ class MainApp {
           {
             label: 'Visit AI.Opensubtitles.com',
             click: async () => {
-              await shell.openExternal('https://ai.opensubtitles.com');
+              this.sendUpdateStatus('external-disabled', 'External links are disabled in local AI mode');
             }
           },
           {
             label: 'Report Issue',
             click: async () => {
-              await shell.openExternal('https://github.com/iceman1010/ai-opensubtitles-desktop-client/issues');
+              this.sendUpdateStatus('external-disabled', 'External links are disabled in local AI mode');
             }
           },
           ...(isMac ? [] : [
@@ -580,106 +582,7 @@ class MainApp {
   }
 
   private async setupAutoUpdater() {
-    // Skip auto-updater setup in development
-    const isDev = process.env.NODE_ENV === 'development';
-    this.debug(2, 'AutoUpdater', '=== AUTO-UPDATER SETUP ===');
-    this.debug(2, 'AutoUpdater', 'Environment:', process.env.NODE_ENV);
-    this.debug(2, 'AutoUpdater', 'Is Development:', isDev);
-    
-    if (isDev) {
-      this.debug(2, 'AutoUpdater', 'Skipping auto-updater setup in development mode');
-      return;
-    }
-
-    try {
-      this.debug(2, 'AutoUpdater', 'Configuring auto-updater for GitHub releases...');
-      
-      // Configure auto-updater for GitHub releases
-      autoUpdater.setFeedURL({
-        provider: 'github',
-        owner: 'iceman1010',
-        repo: 'ai-opensubtitles-desktop-client'
-      });
-      
-      // Fix version comparison issues with missing releases
-      autoUpdater.allowPrerelease = false;
-
-      // Disable automatic downloads - require user confirmation
-      autoUpdater.autoDownload = false;
-
-      this.debug(2, 'AutoUpdater', 'Auto-updater feed URL set successfully');
-    } catch (error) {
-      console.error('Failed to configure auto-updater:', error);
-    }
-
-    // Set up auto-updater event handlers
-    autoUpdater.on('checking-for-update', () => {
-      this.debug(2, 'AutoUpdater', 'Checking for update...');
-      this.sendUpdateStatus('checking-for-update', 'Checking for updates...');
-    });
-
-    autoUpdater.on('update-available', async (info) => {
-      this.debug(2, 'AutoUpdater', 'Update available:', info);
-      this.sendUpdateStatus('update-available', `Update available: v${info.version}`);
-
-       // Show confirmation dialog before downloading
-       const currentVersion = app.getVersion();
-       const response = await dialog.showMessageBox(this.mainWindow!, {
-         type: 'info',
-         buttons: ['Download Now', 'Later'],
-         defaultId: 0,
-         cancelId: 1,
-         title: 'Update Available',
-         message: `A new version (v${info.version}) is available.`,
-         detail: 'Would you like to download and install the update now? The application will restart after installation.'
-       });
-
-       if (response.response === 0) {
-         this.debug(2, 'AutoUpdater', 'User confirmed update download');
-         this.sendUpdateStatus('update-downloading', 'Starting download...');
-         try {
-          await autoUpdater.downloadUpdate();
-        } catch (error) {
-          console.error('Failed to download update:', error);
-          this.sendUpdateStatus('update-error', 'Failed to download update');
-        }
-      } else {
-        this.debug(2, 'AutoUpdater', 'User declined update download');
-        this.sendUpdateStatus('update-declined', 'Update download declined');
-      }
-    });
-
-    autoUpdater.on('update-not-available', (info) => {
-      this.debug(2, 'AutoUpdater', 'Update not available:', info);
-      this.sendUpdateStatus('update-not-available', 'You have the latest version');
-    });
-
-    autoUpdater.on('error', (err) => {
-      console.error('Update error:', err);
-      this.sendUpdateStatus('update-error', `Update error: ${err.message}`);
-    });
-
-    autoUpdater.on('download-progress', (progressObj) => {
-      const logMessage = `Download speed: ${progressObj.bytesPerSecond} - Downloaded ${progressObj.percent}% (${progressObj.transferred}/${progressObj.total})`;
-      this.debug(3, 'AutoUpdater', logMessage);
-      this.sendUpdateStatus('update-downloading', `Downloading update: ${Math.round(progressObj.percent)}%`);
-    });
-
-    autoUpdater.on('update-downloaded', async (info) => {
-      this.debug(2, 'AutoUpdater', 'Update downloaded:', info);
-      this.sendUpdateStatus('update-downloaded', `Update ready: v${info.version}`);
-
-      // Automatically prompt user to install the update
-      await this.promptForInstallation(info);
-    });
-
-    // Check for updates on startup if enabled
-    const updateConfig = await this.configManager.getConfig();
-    if (updateConfig.checkUpdatesOnStart) {
-      setTimeout(() => {
-        this.checkForUpdates();
-      }, 3000); // Wait 3 seconds after startup
-    }
+    this.debug(2, 'AutoUpdater', 'Auto-updater disabled in local AI build');
   }
 
   private sendUpdateStatus(event: string, message: string) {
@@ -689,73 +592,11 @@ class MainApp {
   }
 
    private async checkForUpdates() {
-     const isDev = process.env.NODE_ENV === 'development';
-     this.debug(3, 'UpdateCheck', '=== UPDATE CHECK DEBUG ===');
-     this.debug(3, 'UpdateCheck', 'Environment:', process.env.NODE_ENV);
-     this.debug(3, 'UpdateCheck', 'Is Development:', isDev);
-     this.debug(3, 'UpdateCheck', 'Platform:', process.platform);
-     this.debug(3, 'UpdateCheck', 'App Version:', app.getVersion());
-     
-     if (isDev) {
-      this.debug(2, 'UpdateCheck', 'Update check skipped in development mode');
-      this.sendUpdateStatus('update-not-available', 'Updates not available in development mode');
-      return;
-    }
-
-    try {
-      this.debug(2, 'UpdateCheck', 'Starting update check...');
-      this.debug(3, 'UpdateCheck', 'AutoUpdater feed URL:', {
-        provider: 'github',
-        owner: 'iceman1010',
-        repo: 'ai-opensubtitles-desktop-client'
-      });
-      
-      const result = await autoUpdater.checkForUpdates();
-      this.debug(3, 'UpdateCheck', 'Update check result:', result);
-    } catch (error) {
-      console.error('Failed to check for updates:', error);
-      console.error('Error details:', {
-        name: error instanceof Error ? error.name : 'Unknown',
-        message: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : 'No stack trace'
-      });
-      
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      this.sendUpdateStatus('update-error', `Update check failed: ${errorMessage}`);
-    }
-    this.debug(3, 'UpdateCheck', '=== END UPDATE CHECK DEBUG ===');
-  }
+     this.sendUpdateStatus('update-disabled', 'External update checks are disabled in local AI mode');
+   }
 
   private async downloadAndInstallUpdate() {
-    const isDev = process.env.NODE_ENV === 'development';
-    if (isDev) {
-      this.sendUpdateStatus('update-error', 'Downloads not available in development mode');
-      return;
-    }
-
-    // Show confirmation dialog before downloading
-    const response = await dialog.showMessageBox(this.mainWindow!, {
-      type: 'info',
-      buttons: ['Download Now', 'Cancel'],
-      defaultId: 0,
-      cancelId: 1,
-      title: 'Download Update',
-      message: 'Are you sure you want to download the update?',
-      detail: 'The update will be downloaded and you will be prompted to install it when ready.'
-    });
-
-    if (response.response !== 0) {
-      this.sendUpdateStatus('update-declined', 'Update download cancelled');
-      return;
-    }
-
-    this.sendUpdateStatus('update-downloading', 'Starting download...');
-    try {
-      await autoUpdater.downloadUpdate();
-    } catch (error) {
-      console.error('Failed to download update:', error);
-      this.sendUpdateStatus('update-error', 'Failed to download update');
-    }
+    this.sendUpdateStatus('update-disabled', 'External update downloads are disabled in local AI mode');
   }
 
   private async checkUpdatePermissions(): Promise<{ canInstall: boolean; error?: string }> {
@@ -1181,6 +1022,57 @@ class MainApp {
       }
     });
 
+    ipcMain.handle('get-local-whisper-models', async () => {
+      const config = this.configManager.getConfig();
+      const whisper = new WhisperManager(this.ffmpegManager.getFFmpegPath(), app.getPath('userData'));
+      return whisper.getModelIds({
+        engine: config.localTranscriptionEngine,
+        executablePath: config.whisperExecutablePath,
+        modelPath: config.whisperModelPath,
+        model: config.whisperModel
+      });
+    });
+
+    ipcMain.handle('transcribe-local-audio', async (_, inputPath: string, options: { language?: string; model?: string } = {}) => {
+      try {
+        const config = this.configManager.getConfig();
+        const whisper = new WhisperManager(this.ffmpegManager.getFFmpegPath(), app.getPath('userData'));
+        return await whisper.transcribe({
+          inputPath,
+          language: options.language,
+          model: options.model || config.whisperModel || 'base',
+          engine: config.localTranscriptionEngine || 'whisper-cpp',
+          executablePath: config.whisperExecutablePath,
+          modelPath: config.whisperModelPath
+        });
+      } catch (error) {
+        console.error('Local Whisper transcription failed:', error);
+        throw error;
+      }
+    });
+
+    ipcMain.handle('get-argos-language-pairs', async () => {
+      try {
+        const config = this.configManager.getConfig();
+        const argos = new ArgosManager(app.getPath('userData'));
+        return await argos.listPairs({ pythonPath: config.argosPythonPath });
+      } catch (error) {
+        console.error('Failed to list Argos language pairs:', error);
+        throw error;
+      }
+    });
+
+    ipcMain.handle('translate-with-argos', async (_, content: string, sourceLanguage: string, targetLanguage: string) => {
+      try {
+        const config = this.configManager.getConfig();
+        const argos = new ArgosManager(app.getPath('userData'));
+        return await argos.translateSubtitle(content, sourceLanguage, targetLanguage, { pythonPath: config.argosPythonPath });
+      } catch (error) {
+        console.error('Argos translation failed:', error);
+        throw error;
+      }
+    });
+
     ipcMain.handle('get-media-info', async (_, filePath: string) => {
       try {
         console.log('[get-media-info] Received path:', filePath);
@@ -1272,13 +1164,8 @@ class MainApp {
     });
 
     ipcMain.handle('open-external', async (_, url: string) => {
-      try {
-        await shell.openExternal(url);
-        return true;
-      } catch (error) {
-        console.error('Failed to open external URL:', error);
-        return false;
-      }
+      this.debug(1, 'Main', 'Blocked external URL in local AI mode:', url);
+      return false;
     });
 
     ipcMain.handle('save-file', async (_, content: string, defaultFileName: string) => {

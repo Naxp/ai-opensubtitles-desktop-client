@@ -2,6 +2,7 @@ import CacheManager from './cache';
 import { logger } from '../utils/errorLogger';
 import { apiRequestWithRetry, getUserFriendlyErrorMessage } from '../utils/networkUtils';
 import appConfig from '../config/appConfig.json';
+import { LocalAIConfig, LocalAIService, LOCAL_LANGUAGES } from './localAI';
 
 /** Re-throw auth errors so they propagate to handleAPICall in APIContext */
 function rethrowIfAuthError(error: any): void {
@@ -248,8 +249,9 @@ export class OpenSubtitlesAPI {
   private username: string = '';
   private password: string = '';
   private tokenRefreshPromise: Promise<boolean> | null = null;
+  private localAI: LocalAIService | null = null;
 
-  constructor(apiKey?: string, baseUrl?: string, apiUrlParameter?: string) {
+  constructor(apiKey?: string, baseUrl?: string, apiUrlParameter?: string, localAIConfig?: LocalAIConfig) {
     console.trace('[API] NEW OpenSubtitlesAPI instance created');
     if (apiKey) {
       this.setApiKey(apiKey);
@@ -260,6 +262,63 @@ export class OpenSubtitlesAPI {
     if (apiUrlParameter) {
       this.setApiUrlParameter(apiUrlParameter);
     }
+    if (localAIConfig?.provider) {
+      this.localAI = new LocalAIService(localAIConfig);
+      logger.info('API', `Local AI mode enabled: ${localAIConfig.provider}`);
+    }
+  }
+
+  isLocalMode(): boolean {
+    return this.localAI !== null;
+  }
+
+  private async getLocalModels(): Promise<string[]> {
+    if (!this.localAI) return [];
+    const models = await this.localAI.listModels();
+    return models.map(model => model.id);
+  }
+
+  private async getLocalTranslationLanguages(): Promise<LanguageInfo[]> {
+    if (this.localAI?.provider !== 'argos') {
+      return LOCAL_LANGUAGES as LanguageInfo[];
+    }
+
+    if (!window.electronAPI?.getArgosLanguagePairs) {
+      return (LOCAL_LANGUAGES as LanguageInfo[]).filter(lang => lang.language_code !== 'auto');
+    }
+
+    const pairs = await window.electronAPI.getArgosLanguagePairs();
+    const codes = new Set<string>();
+    if (Array.isArray(pairs)) {
+      pairs.forEach((pair: any) => {
+        if (pair?.from) codes.add(pair.from);
+        if (pair?.to) codes.add(pair.to);
+      });
+    }
+
+    return (LOCAL_LANGUAGES as LanguageInfo[]).filter(lang => codes.has(lang.language_code));
+  }
+
+  private async getLocalTranscriptionModels(): Promise<string[]> {
+    if (typeof window !== 'undefined' && window.electronAPI?.getLocalWhisperModels) {
+      const models = await window.electronAPI.getLocalWhisperModels();
+      if (Array.isArray(models) && models.length > 0) {
+        return models;
+      }
+    }
+
+    return ['whisper-base'];
+  }
+
+  private buildLocalLanguagesByModel(models: string[], languages: LanguageInfo[] = LOCAL_LANGUAGES as LanguageInfo[]): { [apiName: string]: LanguageInfo[] } {
+    return models.reduce((acc, model) => {
+      acc[model] = languages;
+      return acc;
+    }, {} as { [apiName: string]: LanguageInfo[] });
+  }
+
+  private localUnsupported(message: string): APIResponse {
+    return { status: 'ERROR', errors: [message] };
   }
 
   setBaseUrl(baseUrl: string): void {
@@ -379,6 +438,12 @@ export class OpenSubtitlesAPI {
   }
 
   async login(username: string, password: string): Promise<{ success: boolean; token?: string; user_id?: number; error?: string }> {
+    if (this.localAI) {
+      this.username = username;
+      this.password = password;
+      return { success: true, token: 'local-ai', user_id: 0 };
+    }
+
     // Validate required parameters before attempting login
     if (!username || !password) {
       const error = 'Username and password are required';
@@ -470,6 +535,21 @@ export class OpenSubtitlesAPI {
   }
 
   async getTranscriptionInfo(): Promise<{ success: boolean; data?: TranscriptionInfo; error?: string }> {
+    if (this.localAI) {
+      try {
+        const models = await this.getLocalTranscriptionModels();
+        return {
+          success: true,
+          data: {
+            apis: models,
+            languages: this.buildLocalLanguagesByModel(models)
+          }
+        };
+      } catch (error: any) {
+        return { success: false, error: error.message || 'Failed to load local transcription models' };
+      }
+    }
+
     const cacheKey = 'transcription_info';
     const cached = CacheManager.get<TranscriptionInfo>(cacheKey);
 
@@ -555,6 +635,22 @@ export class OpenSubtitlesAPI {
   }
 
   async getTranslationInfo(): Promise<{ success: boolean; data?: TranslationInfo; error?: string }> {
+    if (this.localAI) {
+      try {
+        const models = await this.getLocalModels();
+        const languages = await this.getLocalTranslationLanguages();
+        return {
+          success: true,
+          data: {
+            apis: models,
+            languages: this.buildLocalLanguagesByModel(models, languages)
+          }
+        };
+      } catch (error: any) {
+        return { success: false, error: error.message || 'Failed to load local translation models' };
+      }
+    }
+
     const cacheKey = 'translation_info';
     const cached = CacheManager.get<TranslationInfo>(cacheKey);
 
@@ -643,6 +739,52 @@ export class OpenSubtitlesAPI {
     audioFile: File | string,
     options: TranscriptionOptions
   ): Promise<APIResponse> {
+    if (this.localAI) {
+      try {
+        if (typeof audioFile !== 'string') {
+          return this.localUnsupported('Local Whisper transcription requires a local file path.');
+        }
+
+        if (!window.electronAPI?.transcribeLocalAudio) {
+          return this.localUnsupported('Local Whisper transcription is not available in this build.');
+        }
+
+        const result = await window.electronAPI.transcribeLocalAudio(audioFile, {
+          language: options.language,
+          model: options.api
+        });
+        const content = result.content || '';
+        const resultUrl = this.localAI.storeResult(content);
+
+        return {
+          status: 'COMPLETED',
+          data: {
+            file_name: result.fileName || `${getFileNameFromPath(audioFile)}.srt`,
+            url: resultUrl,
+            character_count: content.length,
+            unit_price: 0,
+            total_price: 0,
+            credits_left: 0,
+            task: {
+              login: 'local',
+              loginid: 'local',
+              id: resultUrl,
+              api: result.model || options.api,
+              language: options.language,
+              start_time: Date.now()
+            },
+            complete: 1,
+            return_content: content
+          } as CompletedTaskData & { return_content: string }
+        };
+      } catch (error: any) {
+        return {
+          status: 'ERROR',
+          errors: [error.message || 'Local Whisper transcription failed']
+        };
+      }
+    }
+
     try {
       logger.info('API', 'Initiating transcription', {
         fileType: typeof audioFile,
@@ -761,6 +903,51 @@ export class OpenSubtitlesAPI {
     subtitleFile: File | string,
     options: TranslationOptions
   ): Promise<APIResponse> {
+    if (this.localAI) {
+      try {
+        const fileData = typeof subtitleFile === 'string'
+          ? await window.electronAPI.readTextFile(subtitleFile)
+          : { content: await subtitleFile.text(), fileName: subtitleFile.name };
+
+        const translated = await this.localAI.translateSubtitleContent(
+          fileData.content,
+          options.api,
+          options.translateFrom,
+          options.translateTo
+        );
+        const resultUrl = this.localAI.storeResult(translated);
+
+        return {
+          status: 'COMPLETED',
+          translation: translated,
+          data: {
+            file_name: fileData.fileName,
+            url: resultUrl,
+            character_count: fileData.content.length,
+            unit_price: 0,
+            total_price: 0,
+            credits_left: 0,
+            task: {
+              login: 'local',
+              loginid: 'local',
+              id: resultUrl,
+              api: options.api,
+              language: options.translateFrom,
+              translation: options.translateTo,
+              start_time: Date.now()
+            },
+            complete: 1,
+            return_content: translated
+          }
+        };
+      } catch (error: any) {
+        return {
+          status: 'ERROR',
+          errors: [error.message || 'Local translation failed']
+        };
+      }
+    }
+
     try {
       logger.info('API', 'Initiating translation', {
         fileType: typeof subtitleFile,
@@ -852,6 +1039,34 @@ export class OpenSubtitlesAPI {
   }
 
   async checkTranscriptionStatus(correlationId: string): Promise<APIResponse<CompletedTaskData>> {
+    if (this.localAI) {
+      const content = this.localAI.getStoredResult(correlationId);
+      if (!content) {
+        return { status: 'ERROR', errors: ['Local transcription result was not found'] };
+      }
+
+      return {
+        status: 'COMPLETED',
+        data: {
+          file_name: 'local-transcription.srt',
+          url: correlationId,
+          character_count: content.length,
+          unit_price: 0,
+          total_price: 0,
+          credits_left: 0,
+          task: {
+            login: 'local',
+            loginid: 'local',
+            id: correlationId,
+            api: 'whisper',
+            language: 'auto',
+            start_time: Date.now()
+          },
+          complete: 1
+        }
+      };
+    }
+
     try {
       logger.info('API', 'Checking transcription status', { correlationId });
       return await apiRequestWithRetry(async () => {
@@ -889,6 +1104,35 @@ export class OpenSubtitlesAPI {
   }
 
   async checkTranslationStatus(correlationId: string): Promise<APIResponse<CompletedTaskData>> {
+    if (this.localAI) {
+      const content = this.localAI.getStoredResult(correlationId);
+      if (!content) {
+        return { status: 'ERROR', errors: ['Local translation result was not found'] };
+      }
+
+      return {
+        status: 'COMPLETED',
+        translation: content,
+        data: {
+          file_name: 'local-translation.srt',
+          url: correlationId,
+          character_count: content.length,
+          unit_price: 0,
+          total_price: 0,
+          credits_left: 0,
+          task: {
+            login: 'local',
+            loginid: 'local',
+            id: correlationId,
+            api: 'local',
+            language: 'auto',
+            start_time: Date.now()
+          },
+          complete: 1
+        }
+      };
+    }
+
     try {
       logger.info('API', 'Checking translation status', { correlationId });
       return await apiRequestWithRetry(async () => {
@@ -926,6 +1170,42 @@ export class OpenSubtitlesAPI {
   }
 
   async detectLanguage(file: File | string, duration?: number): Promise<APIResponse<LanguageDetectionResult>> {
+    if (this.localAI) {
+      try {
+        if (typeof file === 'string' && !/\.(srt|vtt|txt)$/i.test(file)) {
+          return this.localUnsupported('Local audio language detection is not available through Ollama or LM Studio.');
+        }
+
+        const fileData = typeof file === 'string'
+          ? await window.electronAPI.readTextFile(file)
+          : { content: await file.text(), fileName: file.name };
+        const models = await this.getLocalModels();
+        const model = models[0];
+
+        if (!model) {
+          return this.localUnsupported('No local AI model is available for language detection.');
+        }
+
+        const detected = await this.localAI.detectTextLanguage(fileData.content, model);
+        return {
+          status: 'COMPLETED',
+          data: {
+            type: 'text',
+            language: {
+              W3C: detected.language_code,
+              name: detected.language_name,
+              native: detected.language_name,
+              ISO_639_1: detected.language_code,
+              ISO_639_2b: detected.language_code
+            },
+            duration
+          }
+        };
+      } catch (error: any) {
+        return { status: 'ERROR', errors: [error.message || 'Local language detection failed'] };
+      }
+    }
+
     try {
       return await apiRequestWithRetry(async () => {
         const formData = new FormData();
@@ -1016,6 +1296,13 @@ export class OpenSubtitlesAPI {
   }
 
   async checkLanguageDetectionStatus(correlationId: string): Promise<APIResponse<LanguageDetectionResult>> {
+    if (this.localAI) {
+      return {
+        status: 'ERROR',
+        errors: [`Local language detection status is unavailable for ${correlationId}`]
+      };
+    }
+
     try {
       return await apiRequestWithRetry(async () => {
         const headers: Record<string, string> = {
@@ -1081,6 +1368,10 @@ export class OpenSubtitlesAPI {
   }
 
   async getTranscriptionLanguagesForApi(apiId: string): Promise<{ success: boolean; data?: LanguageInfo[]; error?: string }> {
+    if (this.localAI) {
+      return { success: true, data: LOCAL_LANGUAGES as LanguageInfo[] };
+    }
+
     const cacheKey = `transcription_languages_${apiId}`;
     const cached = CacheManager.get<LanguageInfo[]>(cacheKey);
     
@@ -1137,6 +1428,10 @@ export class OpenSubtitlesAPI {
   }
 
   async getTranslationLanguagesForApi(apiId: string): Promise<{ success: boolean; data?: LanguageInfo[]; error?: string }> {
+    if (this.localAI) {
+      return { success: true, data: await this.getLocalTranslationLanguages() };
+    }
+
     const cacheKey = `translation_languages_${apiId}`;
     const cached = CacheManager.get<LanguageInfo[]>(cacheKey);
     
@@ -1219,6 +1514,21 @@ export class OpenSubtitlesAPI {
   }
 
   async getTranslationApisForLanguage(sourceLanguage: string, targetLanguage: string): Promise<{ success: boolean; data?: string[]; error?: string }> {
+    if (this.localAI) {
+      try {
+        if (this.localAI.provider === 'argos' && window.electronAPI?.getArgosLanguagePairs) {
+          const source = sourceLanguage.split(/[-_]/)[0].toLowerCase();
+          const target = targetLanguage.split(/[-_]/)[0].toLowerCase();
+          const pairs = await window.electronAPI.getArgosLanguagePairs();
+          const hasPair = Array.isArray(pairs) && pairs.some((pair: any) => pair.from === source && pair.to === target);
+          return { success: true, data: hasPair ? await this.getLocalModels() : [] };
+        }
+        return { success: true, data: await this.getLocalModels() };
+      } catch (error: any) {
+        return { success: false, error: error.message || 'Failed to load local models' };
+      }
+    }
+
     const cacheKey = `translation_apis_${sourceLanguage}_${targetLanguage}`;
     const cached = CacheManager.get<string[]>(cacheKey);
     
@@ -1279,6 +1589,14 @@ export class OpenSubtitlesAPI {
   }
 
   async downloadFile(url: string): Promise<{ success: boolean; content?: string; error?: string }> {
+    if (this.localAI) {
+      const content = this.localAI.getStoredResult(url);
+      if (content !== null) {
+        return { success: true, content };
+      }
+      return { success: false, error: 'Local result was not found' };
+    }
+
     try {
       const result = await apiRequestWithRetry(async () => {
         const headers: Record<string, string> = {
@@ -1320,6 +1638,10 @@ export class OpenSubtitlesAPI {
   }
 
   async downloadFileByMediaId(mediaId: string, fileName: string): Promise<{ success: boolean; content?: string; error?: string }> {
+    if (this.localAI) {
+      return { success: false, error: 'Recent media downloads are unavailable in local AI mode.' };
+    }
+
     try {
       logger.info('API', 'Downloading file by media ID', { mediaId, fileName });
 
@@ -1383,6 +1705,10 @@ export class OpenSubtitlesAPI {
   }
 
   async getCredits(): Promise<{ success: boolean; credits?: number; error?: string }> {
+    if (this.localAI) {
+      return { success: true, credits: 1000000 };
+    }
+
     try {
       const result = await apiRequestWithRetry(async () => {
         const headers: Record<string, string> = {
@@ -1430,6 +1756,40 @@ export class OpenSubtitlesAPI {
   }
 
   async getServicesInfo(): Promise<{ success: boolean; data?: ServicesInfo; error?: string }> {
+    if (this.localAI) {
+      try {
+        const models = await this.getLocalModels();
+        const transcriptionModels = await this.getLocalTranscriptionModels();
+        const localModels = models.map(model => ({
+          name: model,
+          display_name: model,
+          description: `${this.localAI!.provider} local model`,
+          pricing: 'Local',
+          reliability: 'Local',
+          price: 0,
+          languages_supported: LOCAL_LANGUAGES as LanguageInfo[]
+        }));
+
+        return {
+          success: true,
+          data: {
+            Translation: localModels,
+            Transcription: transcriptionModels.map(model => ({
+              name: model,
+              display_name: model,
+              description: 'Local Whisper speech-to-text model',
+              pricing: 'Local',
+              reliability: 'Local',
+              price: 0,
+              languages_supported: LOCAL_LANGUAGES as LanguageInfo[]
+            }))
+          }
+        };
+      } catch (error: any) {
+        return { success: false, error: error.message || 'Failed to load local service info' };
+      }
+    }
+
     const cacheKey = 'services_info';
     const cached = CacheManager.get<ServicesInfo>(cacheKey);
     
@@ -1498,6 +1858,10 @@ export class OpenSubtitlesAPI {
   }
 
   async getCreditPackages(email?: string): Promise<{ success: boolean; data?: CreditPackage[]; error?: string }> {
+    if (this.localAI) {
+      return { success: true, data: [] };
+    }
+
     const cacheKey = `credit_packages_${email || 'default'}`;
     const cached = CacheManager.get<CreditPackage[]>(cacheKey);
 
@@ -1568,6 +1932,10 @@ export class OpenSubtitlesAPI {
   }
 
   async getRecentMedia(page: number = 1): Promise<{ success: boolean; data?: RecentMediaItem[]; error?: string }> {
+    if (this.localAI) {
+      return { success: true, data: [] };
+    }
+
     const cacheKey = `recent_media_page_${page}`;
     const cached = CacheManager.get<RecentMediaItem[]>(cacheKey);
 
@@ -1635,6 +2003,10 @@ export class OpenSubtitlesAPI {
   }
 
   async getRecentActivities(page: number = 1): Promise<{ success: boolean; data?: RecentActivityItem[]; error?: string }> {
+    if (this.localAI) {
+      return { success: true, data: [] };
+    }
+
     const cacheKey = `recent_activities_page_${page}`;
     const cached = CacheManager.get<RecentActivityItem[]>(cacheKey);
 
@@ -1702,6 +2074,18 @@ export class OpenSubtitlesAPI {
   }
 
   async searchSubtitles(params: SubtitleSearchParams): Promise<{ success: boolean; data?: any; error?: string }> {
+    if (this.localAI) {
+      return {
+        success: true,
+        data: {
+          data: [],
+          total_count: 0,
+          total_pages: 0,
+          page: params.page || 1
+        }
+      };
+    }
+
     if (!this.apiKey) {
       const error = 'API Key is required to search subtitles';
       logger.error('API', error);
@@ -1775,6 +2159,18 @@ export class OpenSubtitlesAPI {
   }
 
   async searchForFeatures(params: FeatureSearchParams): Promise<{ success: boolean; data?: FeatureSearchResponse; error?: string }> {
+    if (this.localAI) {
+      return {
+        success: true,
+        data: {
+          data: [],
+          total_count: 0,
+          total_pages: 0,
+          page: 1
+        }
+      };
+    }
+
     if (!this.apiKey) {
       const error = 'API Key is required to search features';
       logger.error('API', error);
@@ -1848,6 +2244,10 @@ export class OpenSubtitlesAPI {
   }
 
   async downloadSubtitle(params: SubtitleDownloadParams): Promise<{ success: boolean; data?: any; error?: string }> {
+    if (this.localAI) {
+      return { success: false, error: 'Subtitle catalog downloads are unavailable in local AI mode.' };
+    }
+
     if (!this.apiKey) {
       const error = 'API Key is required to download subtitles';
       logger.error('API', error);
@@ -1933,6 +2333,10 @@ export class OpenSubtitlesAPI {
    * @returns Promise with success status and SubtitleLanguage array
    */
   async getSubtitleSearchLanguages(): Promise<{ success: boolean; data?: SubtitleLanguage[]; error?: string }> {
+    if (this.localAI) {
+      return { success: true, data: LOCAL_LANGUAGES.filter(lang => lang.language_code !== 'auto') as SubtitleLanguage[] };
+    }
+
     const cacheKey = 'subtitle_search_languages';
     const cacheExpiry = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
 

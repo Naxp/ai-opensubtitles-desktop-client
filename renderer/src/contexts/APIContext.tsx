@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { OpenSubtitlesAPI, TranscriptionInfo, TranslationInfo, SubtitleSearchParams, SubtitleDownloadParams, SubtitleLanguage, FeatureSearchParams } from '../services/api';
+import { LocalAIProvider } from '../services/localAI';
 import { logger } from '../utils/errorLogger';
 import { isOnline, isFullyOnline, invalidateConnectivityCache, forceConnectivityCheck } from '../utils/networkUtils';
 import { usePower } from './PowerContext';
@@ -79,11 +80,20 @@ export const useAPI = () => {
 interface APIProviderProps {
   children: React.ReactNode;
   initialConfig?: {
-    username: string;
-    password: string;
+    username?: string;
+    password?: string;
     apiKey: string;
     apiBaseUrl?: string;
     apiUrlParameter?: string;
+    aiProvider?: LocalAIProvider;
+    ollamaBaseUrl?: string;
+    lmStudioBaseUrl?: string;
+    lmStudioApiKey?: string;
+    argosPythonPath?: string;
+    localTranscriptionEngine?: 'whisper-cpp' | 'openai-whisper';
+    whisperExecutablePath?: string;
+    whisperModelPath?: string;
+    whisperModel?: string;
   };
 }
 
@@ -165,7 +175,13 @@ export const APIProvider: React.FC<APIProviderProps> = ({ children, initialConfi
     if (initialConfig?.apiKey && !api && !apiCreatedRef.current) {
       logger.info('APIContext', 'Creating initial API instance');
       apiCreatedRef.current = true;
-      const apiInstance = new OpenSubtitlesAPI(initialConfig.apiKey, initialConfig.apiBaseUrl, initialConfig.apiUrlParameter);
+      const apiInstance = new OpenSubtitlesAPI(initialConfig.apiKey, initialConfig.apiBaseUrl, initialConfig.apiUrlParameter, {
+        provider: initialConfig.aiProvider,
+        ollamaBaseUrl: initialConfig.ollamaBaseUrl,
+        lmStudioBaseUrl: initialConfig.lmStudioBaseUrl,
+        lmStudioApiKey: initialConfig.lmStudioApiKey,
+        argosPythonPath: initialConfig.argosPythonPath
+      });
       logger.info('APIContext', 'Setting API instance in state (initial)');
       setApi(apiInstance);
 
@@ -180,6 +196,14 @@ export const APIProvider: React.FC<APIProviderProps> = ({ children, initialConfi
           .catch(error => {
             logger.error('APIContext', 'Initial authentication failed:', error);
           });
+      } else {
+        logger.info('APIContext', 'No account credentials configured; enabling local API-key mode');
+        CacheManager.setUser('local');
+        setAuthState(AuthState.AUTHENTICATED);
+        setError(null);
+        loadAPIInfo(apiInstance).catch(error => {
+          logger.warn('APIContext', 'Local API-key metadata load failed:', error);
+        });
       }
     } else {
       logger.debug(1, 'APIContext', 'Skipping API instance creation', {
@@ -189,7 +213,22 @@ export const APIProvider: React.FC<APIProviderProps> = ({ children, initialConfi
       });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- api intentionally excluded: this effect creates api, apiCreatedRef prevents re-execution
-  }, [initialConfig?.apiKey, initialConfig?.username, initialConfig?.password, initialConfig?.apiBaseUrl, initialConfig?.apiUrlParameter]);
+  }, [
+    initialConfig?.apiKey,
+    initialConfig?.username,
+    initialConfig?.password,
+    initialConfig?.apiBaseUrl,
+    initialConfig?.apiUrlParameter,
+    initialConfig?.aiProvider,
+    initialConfig?.ollamaBaseUrl,
+    initialConfig?.lmStudioBaseUrl,
+    initialConfig?.lmStudioApiKey,
+    initialConfig?.argosPythonPath,
+    initialConfig?.localTranscriptionEngine,
+    initialConfig?.whisperExecutablePath,
+    initialConfig?.whisperModelPath,
+    initialConfig?.whisperModel
+  ]);
 
   // Cleanup timer on unmount
   useEffect(() => {
@@ -412,7 +451,13 @@ export const APIProvider: React.FC<APIProviderProps> = ({ children, initialConfi
       let apiInstance = api;
       if (!apiInstance || apiInstance.apiKey !== apiKey) {
         // Only create new instance if none exists or API key changed
-        apiInstance = new OpenSubtitlesAPI(apiKey, initialConfig?.apiBaseUrl, initialConfig?.apiUrlParameter);
+        apiInstance = new OpenSubtitlesAPI(apiKey, initialConfig?.apiBaseUrl, initialConfig?.apiUrlParameter, {
+          provider: initialConfig?.aiProvider,
+          ollamaBaseUrl: initialConfig?.ollamaBaseUrl,
+          lmStudioBaseUrl: initialConfig?.lmStudioBaseUrl,
+          lmStudioApiKey: initialConfig?.lmStudioApiKey,
+          argosPythonPath: initialConfig?.argosPythonPath
+        });
         logger.info('APIContext', 'Setting API instance in state (login)');
         setApi(apiInstance);
       }
@@ -648,9 +693,7 @@ export const APIProvider: React.FC<APIProviderProps> = ({ children, initialConfi
             setError('Session expired. Click Reconnect to continue.');
           }
         } else if (!initialConfig?.username || !initialConfig?.password) {
-          // No stored credentials — go to login
-          setAuthState(AuthState.UNAUTHENTICATED);
-          setError('Session expired. Please log in again.');
+          setError('This remote account action is disabled in local AI mode.');
         }
       }
 
@@ -774,11 +817,12 @@ export const APIProvider: React.FC<APIProviderProps> = ({ children, initialConfi
 
   // Sync helper functions for filename generation using cached data
   const getTranslationLanguageNameSync = useCallback((apiId: string, languageCode: string): string | null => {
-    if (!(translationInfo?.apis as any)?.[apiId]?.supported_languages) {
+    const languages = translationInfo?.languages?.[apiId];
+    if (!languages) {
       return null;
     }
 
-    const language = (translationInfo!.apis as any)[apiId].supported_languages.find(
+    const language = languages.find(
       (lang: any) => lang.language_code === languageCode
     );
 
@@ -786,11 +830,14 @@ export const APIProvider: React.FC<APIProviderProps> = ({ children, initialConfi
   }, [translationInfo]);
 
   const getTranscriptionLanguageNameSync = useCallback((apiId: string, languageCode: string): string | null => {
-    if (!(transcriptionInfo?.apis as any)?.[apiId]?.supported_languages) {
+    const languages = Array.isArray(transcriptionInfo?.languages)
+      ? transcriptionInfo?.languages
+      : transcriptionInfo?.languages?.[apiId];
+    if (!languages) {
       return null;
     }
 
-    const language = (transcriptionInfo!.apis as any)[apiId].supported_languages.find(
+    const language = languages.find(
       (lang: any) => lang.language_code === languageCode
     );
 

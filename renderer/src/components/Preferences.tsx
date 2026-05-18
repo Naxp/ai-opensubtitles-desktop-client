@@ -2,6 +2,9 @@ import React, { useState, useEffect } from 'react';
 import CacheManager from '../services/cache';
 import { logger } from '../utils/errorLogger';
 import { useAPI } from '../contexts/APIContext';
+import { LocalAIProvider } from '../services/localAI';
+
+type LocalTranscriptionEngine = 'whisper-cpp' | 'openai-whisper';
 
 interface AppConfig {
   username: string;
@@ -18,6 +21,15 @@ interface AppConfig {
   audio_language_detection_time?: number;
   apiBaseUrl?: string;
   apiUrlParameter?: string;
+  aiProvider?: LocalAIProvider;
+  ollamaBaseUrl?: string;
+  lmStudioBaseUrl?: string;
+  lmStudioApiKey?: string;
+  argosPythonPath?: string;
+  localTranscriptionEngine?: LocalTranscriptionEngine;
+  whisperExecutablePath?: string;
+  whisperModelPath?: string;
+  whisperModel?: string;
   autoLanguageDetection?: boolean;
   darkMode?: boolean;
   pollingIntervalSeconds?: number;
@@ -40,13 +52,10 @@ interface PreferencesProps {
 }
 
 function Preferences({ config, onSave, setAppProcessing, onSimulateOffline, onSimulateHibernation, onShowSetup }: PreferencesProps) {
-  const [username, setUsername] = useState(config.username || '');
-  const [password, setPassword] = useState(config.password || '');
-  const [apiKey, setApiKey] = useState(config.apiKey || '');
   const [debugMode, setDebugMode] = useState(config.debugMode || false);
   const [debugLevel, setDebugLevel] = useState(config.debugLevel ?? 0);
   const [debugSectionOpen, setDebugSectionOpen] = useState(true);
-  const [checkUpdatesOnStart, setCheckUpdatesOnStart] = useState(config.checkUpdatesOnStart ?? true);
+  const [checkUpdatesOnStart, setCheckUpdatesOnStart] = useState(config.checkUpdatesOnStart ?? false);
   const [autoRemoveCompletedFiles, setAutoRemoveCompletedFiles] = useState(config.autoRemoveCompletedFiles ?? false);
   const [cacheExpirationHours, setCacheExpirationHours] = useState(config.cacheExpirationHours ?? 24);
   const [betaTest, setBetaTest] = useState(config.betaTest ?? false);
@@ -54,12 +63,19 @@ function Preferences({ config, onSave, setAppProcessing, onSimulateOffline, onSi
   const [audioLanguageDetectionTime, setAudioLanguageDetectionTime] = useState(config.audio_language_detection_time ?? 240);
   const [pollingIntervalSeconds, setPollingIntervalSeconds] = useState(config.pollingIntervalSeconds ?? 10);
   const [pollingTimeoutSeconds, setPollingTimeoutSeconds] = useState(config.pollingTimeoutSeconds ?? 7200);
-  const [apiBaseUrl, setApiBaseUrl] = useState(config.apiBaseUrl || 'https://api.opensubtitles.com/api/v1');
-  const [apiUrlParameter, setApiUrlParameter] = useState(config.apiUrlParameter || '');
+  const [aiProvider, setAiProvider] = useState<LocalAIProvider>(config.aiProvider || 'ollama');
+  const [ollamaBaseUrl, setOllamaBaseUrl] = useState(config.ollamaBaseUrl || 'http://127.0.0.1:11434');
+  const [lmStudioBaseUrl, setLmStudioBaseUrl] = useState(config.lmStudioBaseUrl || 'http://127.0.0.1:1234/v1');
+  const [lmStudioApiKey, setLmStudioApiKey] = useState(config.lmStudioApiKey || '');
+  const [argosPythonPath, setArgosPythonPath] = useState(config.argosPythonPath || '');
+  const [localTranscriptionEngine, setLocalTranscriptionEngine] = useState<LocalTranscriptionEngine>(config.localTranscriptionEngine || 'whisper-cpp');
+  const [whisperExecutablePath, setWhisperExecutablePath] = useState(config.whisperExecutablePath || '');
+  const [whisperModelPath, setWhisperModelPath] = useState(config.whisperModelPath || '');
+  const [whisperModel, setWhisperModel] = useState(config.whisperModel || 'base');
   const [autoLanguageDetection, setAutoLanguageDetection] = useState(config.autoLanguageDetection ?? false);
   const [defaultFilenameFormat, setDefaultFilenameFormat] = useState(config.defaultFilenameFormat || '{filename}.{language_code}.{type}');
   const [apiConnectivityTestIntervalMinutes, setApiConnectivityTestIntervalMinutes] = useState(config.apiConnectivityTestIntervalMinutes ?? 5);
-  const [isLoading, setIsLoading] = useState(false);
+  const isLoading = false;
   const [error, setError] = useState('');
   const [isTestingFfmpeg, setIsTestingFfmpeg] = useState(false);
   const [ffmpegTestResult, setFfmpegTestResult] = useState<{success: boolean, message: string} | null>(null);
@@ -84,16 +100,22 @@ function Preferences({ config, onSave, setAppProcessing, onSimulateOffline, onSi
         if (success) {
           logger.debug(2, 'Preferences', 'Reset successful, updating UI...');
           // Reset local state to match cleared config
-          setUsername('');
-          setPassword('');
-          setApiKey('');
           setDebugMode(false);
           setDebugLevel(0);
-          setCheckUpdatesOnStart(true);
+          setCheckUpdatesOnStart(false);
           setAutoRemoveCompletedFiles(false);
           setFfmpegPath('');
+          setAiProvider('ollama');
+          setOllamaBaseUrl('http://127.0.0.1:11434');
+          setLmStudioBaseUrl('http://127.0.0.1:1234/v1');
+          setLmStudioApiKey('');
+          setArgosPythonPath('');
+          setLocalTranscriptionEngine('whisper-cpp');
+          setWhisperExecutablePath('');
+          setWhisperModelPath('');
+          setWhisperModel('base');
           setAudioLanguageDetectionTime(240);
-          setAutoLanguageDetection(true);
+          setAutoLanguageDetection(false);
           setError('');
           alert('All settings have been reset successfully.');
         } else {
@@ -150,40 +172,6 @@ function Preferences({ config, onSave, setAppProcessing, onSimulateOffline, onSi
     }
   };
 
-  const handleCredentialsSave = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!username || !password || !apiKey) {
-      return;
-    }
-
-    setIsLoading(true);
-    setError('');
-    setAppProcessing(true, 'Validating credentials...');
-    try {
-      const success = await onSave({ username, password, apiKey });
-      if (!success) {
-        setError('Failed to save credentials. Please check your login information.');
-      } else {
-        setError('');
-        // Show success message briefly
-        const successDiv = document.createElement('div');
-        successDiv.className = 'status-message success';
-        successDiv.textContent = 'Credentials saved successfully!';
-        successDiv.style.cssText = 'margin-bottom: 15px; padding: 10px; background: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 4px;';
-        const form = document.querySelector('.preferences-form');
-        if (form) {
-          form.insertBefore(successDiv, form.firstChild);
-          setTimeout(() => successDiv.remove(), 3000);
-        }
-      }
-    } catch (error) {
-      setError('Failed to save credentials. Please check your information and try again.');
-    } finally {
-      setIsLoading(false);
-      setAppProcessing(false);
-    }
-  };
-
   // Helper function to get user-friendly setting names
   const getSettingDisplayName = (settingKey: keyof AppConfig): string => {
     const nameMap: Record<string, string> = {
@@ -194,10 +182,17 @@ function Preferences({ config, onSave, setAppProcessing, onSimulateOffline, onSi
       cacheExpirationHours: 'cache expiration',
       betaTest: 'beta testing',
       ffmpegPath: 'FFmpeg path',
-      apiBaseUrl: 'API base URL',
-      apiUrlParameter: 'API parameters',
       autoLanguageDetection: 'auto language detection',
-      darkMode: 'dark mode'
+      darkMode: 'dark mode',
+      aiProvider: 'local AI provider',
+      ollamaBaseUrl: 'Ollama URL',
+      lmStudioBaseUrl: 'LM Studio URL',
+      lmStudioApiKey: 'LM Studio API key',
+      argosPythonPath: 'Argos Python path',
+      localTranscriptionEngine: 'local transcription engine',
+      whisperExecutablePath: 'Whisper executable path',
+      whisperModelPath: 'Whisper model path',
+      whisperModel: 'Whisper model'
     };
     return nameMap[settingKey] || settingKey;
   };
@@ -333,12 +328,11 @@ function Preferences({ config, onSave, setAppProcessing, onSimulateOffline, onSi
         </div>
       )}
       
-      <form onSubmit={handleCredentialsSave} className="preferences-form">
-        {/* Credentials Section - Requires Save Button */}
+      <form className="preferences-form">
         <div style={{
           padding: '20px',
           backgroundColor: 'var(--bg-tertiary)',
-          border: '2px solid #007bff',
+          border: '2px solid #28a745',
           borderRadius: '8px',
           marginBottom: '25px'
         }}>
@@ -346,14 +340,14 @@ function Preferences({ config, onSave, setAppProcessing, onSimulateOffline, onSi
             marginTop: '0',
             marginBottom: '16px',
             fontSize: '16px',
-            color: '#007bff',
+            color: '#28a745',
             fontWeight: 'bold',
             display: 'flex',
             alignItems: 'center',
             gap: '8px'
           }}>
-            <i className="fas fa-key"></i>
-            Account Credentials
+            <i className="fas fa-microchip"></i>
+            Local AI Provider
           </h3>
           <p style={{
             fontSize: '13px',
@@ -361,70 +355,187 @@ function Preferences({ config, onSave, setAppProcessing, onSimulateOffline, onSi
             marginBottom: '20px',
             lineHeight: '1.4'
           }}>
-            These settings require the "Save Credentials" button and will validate your login information.
+            Local mode sends translation work only to the selected localhost provider. OpenSubtitles API calls are disabled.
           </p>
 
           <div className="form-group">
-            <label htmlFor="username">Username:</label>
-            <input
-              type="text"
-              id="username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              required
-              disabled={isLoading}
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="password">Password:</label>
-            <input
-              type="password"
-              id="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              disabled={isLoading}
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="apiKey">API Key:</label>
-            <input
-              type="text"
-              id="apiKey"
-              value={apiKey}
-              disabled={true}
-              placeholder="API Key (pre-configured)"
-              style={{
-                backgroundColor: 'var(--bg-tertiary)',
-                color: 'var(--text-secondary)',
-                cursor: 'not-allowed'
+            <label htmlFor="ai-provider">Provider:</label>
+            <select
+              id="ai-provider"
+              value={aiProvider}
+              onChange={(e) => {
+                const newValue = e.target.value as LocalAIProvider;
+                setAiProvider(newValue);
+                handleInstantSave('aiProvider', newValue);
               }}
-            />
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
-              <i className="fas fa-lock" style={{ marginRight: '4px' }}></i>
-              This API key is pre-configured and cannot be changed
-            </div>
-          </div>
-
-          <div className="button-group">
-            <button
-              type="submit"
-              className="button"
-              disabled={isLoading || !username || !password}
-              style={{
-                backgroundColor: '#007bff',
-                borderColor: '#007bff',
-                padding: '10px 20px',
-                fontSize: '14px',
-                fontWeight: '600'
-              }}
+              disabled={isLoading}
             >
-              <i className="fas fa-save" style={{ marginRight: '6px' }}></i>
-              {isLoading ? 'Saving...' : 'Save Credentials'}
-            </button>
+              <option value="ollama">Ollama</option>
+              <option value="lmstudio">LM Studio</option>
+              <option value="argos">Argos Translate</option>
+            </select>
           </div>
+
+          <div className="form-group">
+            <label htmlFor="ollama-base-url">Ollama Base URL:</label>
+            <input
+              id="ollama-base-url"
+              type="text"
+              value={ollamaBaseUrl}
+              onChange={(e) => {
+                const newValue = e.target.value;
+                setOllamaBaseUrl(newValue);
+                handleInstantSave('ollamaBaseUrl', newValue);
+              }}
+              disabled={isLoading || aiProvider !== 'ollama'}
+              placeholder="http://127.0.0.1:11434"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="lm-studio-base-url">LM Studio Base URL:</label>
+            <input
+              id="lm-studio-base-url"
+              type="text"
+              value={lmStudioBaseUrl}
+              onChange={(e) => {
+                const newValue = e.target.value;
+                setLmStudioBaseUrl(newValue);
+                handleInstantSave('lmStudioBaseUrl', newValue);
+              }}
+              disabled={isLoading || aiProvider !== 'lmstudio'}
+              placeholder="http://127.0.0.1:1234/v1"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="lm-studio-api-key">LM Studio API Key:</label>
+            <input
+              id="lm-studio-api-key"
+              type="password"
+              value={lmStudioApiKey}
+              onChange={(e) => {
+                const newValue = e.target.value;
+                setLmStudioApiKey(newValue);
+                handleInstantSave('lmStudioApiKey', newValue);
+              }}
+              disabled={isLoading || aiProvider !== 'lmstudio'}
+              placeholder="Optional, only if your LM Studio server requires it"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="argos-python-path">Argos Python Path:</label>
+            <input
+              id="argos-python-path"
+              type="text"
+              value={argosPythonPath}
+              onChange={(e) => {
+                const newValue = e.target.value;
+                setArgosPythonPath(newValue);
+                handleInstantSave('argosPythonPath', newValue);
+              }}
+              disabled={isLoading || aiProvider !== 'argos'}
+              placeholder="Leave blank for the app-local Argos venv"
+            />
+          </div>
+        </div>
+
+        <div style={{
+          padding: '20px',
+          backgroundColor: 'var(--bg-tertiary)',
+          border: '2px solid #17a2b8',
+          borderRadius: '8px',
+          marginBottom: '25px'
+        }}>
+          <h3 style={{
+            marginTop: '0',
+            marginBottom: '16px',
+            fontSize: '16px',
+            color: '#17a2b8',
+            fontWeight: 'bold',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px'
+          }}>
+            <i className="fas fa-wave-square"></i>
+            Local Transcription
+          </h3>
+          <p style={{
+            fontSize: '13px',
+            color: 'var(--text-secondary)',
+            marginBottom: '20px',
+            lineHeight: '1.4'
+          }}>
+            Audio and video transcription runs through a local Whisper-compatible engine. Audio is converted locally with FFmpeg first.
+          </p>
+
+          <div className="form-group">
+            <label htmlFor="local-transcription-engine">Engine:</label>
+            <select
+              id="local-transcription-engine"
+              value={localTranscriptionEngine}
+              onChange={(e) => {
+                const newValue = e.target.value as LocalTranscriptionEngine;
+                setLocalTranscriptionEngine(newValue);
+                handleInstantSave('localTranscriptionEngine', newValue);
+              }}
+              disabled={isLoading}
+            >
+              <option value="whisper-cpp">whisper.cpp</option>
+              <option value="openai-whisper">OpenAI Whisper CLI</option>
+            </select>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="whisper-model">Whisper Model:</label>
+            <input
+              id="whisper-model"
+              type="text"
+              value={whisperModel}
+              onChange={(e) => {
+                const newValue = e.target.value;
+                setWhisperModel(newValue);
+                handleInstantSave('whisperModel', newValue);
+              }}
+              disabled={isLoading}
+              placeholder="base"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="whisper-executable-path">Whisper Executable Path:</label>
+            <input
+              id="whisper-executable-path"
+              type="text"
+              value={whisperExecutablePath}
+              onChange={(e) => {
+                const newValue = e.target.value;
+                setWhisperExecutablePath(newValue);
+                handleInstantSave('whisperExecutablePath', newValue);
+              }}
+              disabled={isLoading}
+              placeholder={localTranscriptionEngine === 'whisper-cpp' ? 'Path to whisper-cli.exe, or leave blank for PATH' : 'Path to whisper CLI, or leave blank for PATH'}
+            />
+          </div>
+
+          {localTranscriptionEngine === 'whisper-cpp' && (
+            <div className="form-group">
+              <label htmlFor="whisper-model-path">whisper.cpp Model Path:</label>
+              <input
+                id="whisper-model-path"
+                type="text"
+                value={whisperModelPath}
+                onChange={(e) => {
+                  const newValue = e.target.value;
+                  setWhisperModelPath(newValue);
+                  handleInstantSave('whisperModelPath', newValue);
+                }}
+                disabled={isLoading}
+                placeholder="Path to ggml-base.bin"
+              />
+            </div>
+          )}
         </div>
 
         {/* Application Settings Section Divider */}
@@ -555,98 +666,6 @@ function Preferences({ config, onSave, setAppProcessing, onSimulateOffline, onSi
 
             {debugSectionOpen && (
               <>
-                <div className="form-group">
-              <label htmlFor="api-base-url" style={{
-                display: 'block',
-                marginBottom: '8px',
-                fontSize: '14px',
-                fontWeight: '500'
-              }}>
-                API Base URL
-              </label>
-              <input
-                id="api-base-url"
-                type="text"
-                value={apiBaseUrl}
-                onChange={(e) => {
-                  const newValue = e.target.value;
-                  setApiBaseUrl(newValue);
-                  handleInstantSave('apiBaseUrl', newValue);
-                }}
-                disabled={isLoading}
-                placeholder="https://api.opensubtitles.com/api/v1"
-                style={{
-                  width: '100%',
-                  padding: '10px 12px',
-                  fontSize: '14px',
-                  border: '2px solid var(--input-border)',
-                  borderRadius: '6px',
-                  backgroundColor: isLoading ? 'var(--bg-tertiary)' : 'var(--input-bg)',
-                  transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
-                  boxSizing: 'border-box',
-                  outline: 'none',
-                  fontFamily: 'monospace'
-                }}
-                onFocus={(e) => e.target.style.borderColor = 'var(--button-bg)'}
-                onBlur={(e) => e.target.style.borderColor = 'var(--input-border)'}
-              />
-              <div style={{
-                fontSize: '12px',
-                color: 'var(--text-secondary)',
-                lineHeight: '1.4',
-                marginTop: '6px',
-                maxWidth: '500px'
-              }}>
-                Base URL for API calls. Only visible in debug mode. Use this to point to a test server for automated testing. Default: https://api.opensubtitles.com/api/v1
-              </div>
-            </div>
-
-            <div className="form-group">
-              <label htmlFor="api-url-parameter" style={{
-                display: 'block',
-                marginBottom: '8px',
-                fontSize: '14px',
-                fontWeight: '500'
-              }}>
-                API URL Parameter
-              </label>
-              <input
-                id="api-url-parameter"
-                type="text"
-                value={apiUrlParameter}
-                onChange={(e) => {
-                  const newValue = e.target.value;
-                  setApiUrlParameter(newValue);
-                  handleInstantSave('apiUrlParameter', newValue);
-                }}
-                disabled={isLoading}
-                placeholder="?var1=1&var2=2"
-                style={{
-                  width: '100%',
-                  padding: '10px 12px',
-                  fontSize: '14px',
-                  border: '2px solid var(--input-border)',
-                  borderRadius: '6px',
-                  backgroundColor: isLoading ? 'var(--bg-tertiary)' : 'var(--input-bg)',
-                  transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
-                  boxSizing: 'border-box',
-                  outline: 'none',
-                  fontFamily: 'monospace'
-                }}
-                onFocus={(e) => e.target.style.borderColor = 'var(--button-bg)'}
-                onBlur={(e) => e.target.style.borderColor = 'var(--input-border)'}
-              />
-              <div style={{
-                fontSize: '12px',
-                color: 'var(--text-secondary)',
-                lineHeight: '1.4',
-                marginTop: '6px',
-                maxWidth: '500px'
-              }}>
-                Optional URL parameters to append to all API requests for debugging. Example: ?debug=1&test=true
-              </div>
-            </div>
-
             <div className="form-group">
               <label htmlFor="api-connectivity-test-interval" style={{
                 display: 'block',
@@ -919,7 +938,7 @@ function Preferences({ config, onSave, setAppProcessing, onSimulateOffline, onSi
                 color: 'var(--text-secondary)',
                 lineHeight: '1.4'
               }}>
-                Display the initial setup/login screen as if this was the first time running the app.
+                Display the optional account setup screen without making it required for local use.
               </p>
               <button
                 onClick={() => {

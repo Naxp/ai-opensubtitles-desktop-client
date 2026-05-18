@@ -31,52 +31,19 @@ function Update({}: UpdateProps) {
 
     window.electronAPI.onUpdateStatus(handleUpdateStatus);
 
-    // Load release history
-    loadReleaseHistory();
-
     return () => {
       window.electronAPI.removeUpdateStatusListener(handleUpdateStatus);
     };
   }, []);
 
   const loadReleaseHistory = async () => {
-    try {
-      // Fetch real releases from GitHub API
-      const response = await fetch('https://api.github.com/repos/iceman1010/ai-opensubtitles-desktop-client/releases');
-      if (!response.ok) {
-        throw new Error(`GitHub API error: ${response.status}`);
-      }
-
-      const releases = await response.json();
-      const formattedReleases: ReleaseInfo[] = releases.slice(0, 10).map((release: any) => ({
-        tag_name: release.tag_name,
-        name: release.name || release.tag_name,
-        published_at: release.published_at,
-        body: release.body || 'No release notes available.',
-        html_url: release.html_url
-      }));
-
-      setReleaseHistory(formattedReleases);
-
-      // Find and store the current release URL
-      const currentRelease = formattedReleases.find(r => r.tag_name === `v${packageJson.version}`);
-      if (currentRelease) {
-        setCurrentReleaseUrl(currentRelease.html_url);
-      }
-    } catch (error) {
-      console.error('Failed to load release history:', error);
-    }
+    setReleaseHistory([]);
+    setCurrentReleaseUrl('');
   };
 
   const handleCheckForUpdates = async () => {
-    setUpdateStatus('Checking for updates...');
-    setIsLoading(true);
-    try {
-      await window.electronAPI.checkForUpdates();
-    } catch (error) {
-      setUpdateStatus('Failed to check for updates');
-      setIsLoading(false);
-    }
+    setUpdateStatus('External update checks are disabled in local AI mode.');
+    setIsLoading(false);
   };
 
   const handleInstallUpdate = async () => {

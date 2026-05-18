@@ -21,6 +21,12 @@ const electronAPI = {
     ipcRenderer.invoke('extract-audio', inputPath, outputPath, onProgress, durationSeconds),
   convertAudio: (inputPath: string, outputPath?: string, onProgress?: (progress: number) => void) => 
     ipcRenderer.invoke('convert-audio', inputPath, outputPath, onProgress),
+  getLocalWhisperModels: () => ipcRenderer.invoke('get-local-whisper-models'),
+  transcribeLocalAudio: (inputPath: string, options?: { language?: string; model?: string }) =>
+    ipcRenderer.invoke('transcribe-local-audio', inputPath, options),
+  getArgosLanguagePairs: () => ipcRenderer.invoke('get-argos-language-pairs'),
+  translateWithArgos: (content: string, sourceLanguage: string, targetLanguage: string) =>
+    ipcRenderer.invoke('translate-with-argos', content, sourceLanguage, targetLanguage),
   getMediaInfo: (filePath: string) => ipcRenderer.invoke('get-media-info', filePath),
   deleteFile: (filePath: string) => ipcRenderer.invoke('delete-file', filePath),
   readTextFile: (filePath: string) => ipcRenderer.invoke('read-text-file', filePath),
