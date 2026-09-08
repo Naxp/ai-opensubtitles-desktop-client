@@ -11,7 +11,7 @@
   },
   "scripts": {
     "dev": "concurrently \"npm run dev:main\" \"npm run dev:renderer\"",
-    "dev:main": "tsc -p main/tsconfig.json && npm run copy:shared && NODE_ENV=development electron dist/main/main.js --no-sandbox --disable-gpu --disable-software-rasterizer --disable-gpu-sandbox",
+    "dev:main": "tsc -p main/tsconfig.json && npm run copy:shared && node build-scripts/run-electron-dev.js",
     "dev:renderer": "vite",
     "build": "npm run build:main && npm run build:renderer && npm run copy:shared",
     "build:main": "tsc -p main/tsconfig.json",
