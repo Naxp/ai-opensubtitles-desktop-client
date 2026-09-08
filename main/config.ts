@@ -153,8 +153,7 @@ export class ConfigManager {
   }
 
   updateCredits(used: number, remaining: number): void {
-    this.config.credits = { used, remaining };
-    this.saveConfig({});
+    this.saveConfig({ credits: { used, remaining } });
   }
 
   isConfigured(): boolean {
